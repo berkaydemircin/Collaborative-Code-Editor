@@ -6,7 +6,7 @@ This app is a collaborative code editor, allowing users to establish a connectio
 * WebRTC
 * PeerJS
 * Express.js
-* Socket.io (Higher level implementation of WebSocket
+* Socket.io (Higher level implementation of WebSocket)
 * CodeMirror
 * EJS
 
