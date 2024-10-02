@@ -21,7 +21,7 @@ navigator.mediaDevices.getUserMedia({
     call.answer(stream);
     const video = document.createElement('video');
     call.on('stream', userVideoStream => {
-      addVideoStream(video, userVideoStream);
+      addVideoStream(video, userVideoStream, call.peer);
     });
   });
 
@@ -66,7 +66,7 @@ function connectToNewUser(userId, stream) {
   const video = document.createElement('video');
 
   call.on('stream', userVideoStream => {
-    addVideoStream(video, userVideoStream);
+    addVideoStream(video, userVideoStream, userId);
   });
 
   call.on('close', () => {
@@ -76,8 +76,9 @@ function connectToNewUser(userId, stream) {
   peers[userId] = call;
 }
 
-function addVideoStream(video, stream) {
+function addVideoStream(video, stream, peerId) {
   video.srcObject = stream;
+  video.setAttribute('data-peer-id', peerId);
   video.addEventListener('loadedmetadata', () => {
     video.play();
   });
