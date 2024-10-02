@@ -6,7 +6,7 @@
   <script>
     const ROOM_ID = "<%= roomId %>";
   </script>
-  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script defer src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script defer src="/socket.io/socket.io.js"></script>
   <script defer src="script.js"></script>
 
@@ -67,7 +67,9 @@
       position: absolute;
       top: 10px;
       right: 10px;
-    }
+      z-index: 10; /* Ensure it's on top of other elements */
+      background-color: white; /* Optional: Set a background color */
+}
 
   </style>
 </head>
