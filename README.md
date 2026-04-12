@@ -24,13 +24,8 @@ This will install the peerjs server used for WebRTC signaling. Now you're done w
 ## To run the code
 Run:
 ```
-node server.js
+npm start
 ```
-and
-```
-peerjs --port 3001
-```
-Please note that 3001 is currently hard-coded so if you need to run the app on a different port, please check script.js under the public directory. Now the localhost is ready! Go to localhost:3000 to test the app! (Note the 3000 port is located at the bottom of server.js if it needs to be changed)
 
 ## Troubleshooting
-You must give the browser permission to use the webcam and microphone for the program to work. If you did and there is still no webcam video, please check your OS' privacy settings. If you encounter any errors, please feel free to contact me.
+You must give the browser permission to use the webcam and microphone for the program to work. If you did and there is still no webcam video, please check your OS' privacy settings. Also, note that port 3000 and 3001 must be free. If you encounter any errors, please feel free to contact me.
