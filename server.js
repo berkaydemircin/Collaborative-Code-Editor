@@ -11,69 +11,134 @@ const rooms = new Map();
 
 app.set('view engine', 'ejs');
 app.use(express.static('public'));
+app.use(express.urlencoded({ extended: true }));
 
 app.get('/', (req, res) => {
-  res.redirect(`/${newID()}`);
+  res.render('index');
+});
+
+app.post('/create-room', (req, res) => {
+  const roomId = newID();
+  const enableSyntax = req.body.syntax === 'on';
+  rooms.set(roomId, {
+    host: null,
+    users: new Set(),
+    config: {
+      syntaxHighlighting: enableSyntax
+    }
+  });
+
+  const avQuery = `?video=${req.body.video === 'on'}&audio=${req.body.audio === 'on'}`;
+  res.redirect(`/${roomId}${avQuery}`);
+});
+
+app.get('/join-room', (req, res) => {
+  const roomId = req.query.roomId;
+  if (!roomId) return res.redirect('/');
+  const avQuery = `?video=${req.query.video === 'on'}&audio=${req.query.audio === 'on'}`;
+  res.redirect(`/${roomId}${avQuery}`);
 });
 
 app.get('/:room', (req, res) => {
-  res.render('room', { roomId: req.params.room });
+  if (req.params.room === 'favicon.ico') return res.status(204).end();
+
+  const videoOn = req.query.video !== 'false';
+  const audioOn = req.query.audio !== 'false';
+  res.render('room', {
+    roomId: req.params.room,
+    videoOn,
+    audioOn
+  });
 });
 
 io.on('connection', socket => {
   let currentRoom = null;
   let currentUserId = null;
+  let currentRoomObj = null;
 
   socket.on('join-room', (roomId, userId) => {
     currentRoom = roomId;
     currentUserId = userId;
 
-    if (!rooms.has(roomId)) {
-      rooms.set(roomId, new Set());
+    let roomObj = rooms.get(roomId);
+
+    if (!roomObj) {
+      roomObj = {
+        host: null,
+        users: new Set(),
+        config: { syntaxHighlighting: true }
+      };
+      rooms.set(roomId, roomObj);
     }
-    rooms.get(roomId).add(userId);
 
+    currentRoomObj = roomObj;
+
+    let isHost = false;
+    if (roomObj.users.size === 0 || roomObj.host === null) {
+      roomObj.host = userId;
+      isHost = true;
+    }
+
+    roomObj.users.add(userId);
     socket.join(roomId);
+
+    socket.emit('room-config', {
+      isHost,
+      hostId: roomObj.host,
+      syntaxHighlighting: roomObj.config.syntaxHighlighting
+    });
+
     socket.to(roomId).emit('user-connected', userId);
-
-    const roomUsers = Array.from(rooms.get(roomId));
-    socket.emit('room-users', roomUsers);
-
-    socket.on('code-update', (code) => {
-      socket.to(roomId).emit('code-update', code, socket.id);
-    });
-
-    socket.on('language-change', (language) => {
-      socket.to(roomId).emit('language-change', language);
-    });
   });
 
-  socket.on('disconnect', () => {
-    if (currentRoom && currentUserId) {
-      const room = rooms.get(currentRoom);
-      if (room) {
-        room.delete(currentUserId);
-        if (room.size === 0) {
-          rooms.delete(currentRoom);
-        }
-      }
-      socket.to(currentRoom).emit('user-disconnected', currentUserId);
+  socket.on('code-update', (code) => {
+    if (currentRoom) socket.to(currentRoom).emit('code-update', code, socket.id);
+  });
+
+  socket.on('language-change', (language) => {
+    if (currentRoomObj && currentRoomObj.host === currentUserId) {
+      socket.to(currentRoom).emit('language-change', language);
     }
+  });
+
+  socket.on('cam-state', (enabled) => {
+    if (currentRoom) socket.to(currentRoom).emit('peer-cam-state', currentUserId, enabled);
+  });
+
+  socket.on('mic-state', (enabled) => {
+    if (currentRoom) socket.to(currentRoom).emit('peer-mic-state', currentUserId, enabled);
   });
 
   socket.on('leave-room', () => {
-    if (currentRoom && currentUserId) {
-      const room = rooms.get(currentRoom);
-      if (room) {
-        room.delete(currentUserId);
-        if (room.size === 0) {
-          rooms.delete(currentRoom);
-        }
-      }
-      socket.to(currentRoom).emit('user-disconnected', currentUserId);
-      socket.leave(currentRoom);
-    }
+    handleDisconnect();
+    if (currentRoom) socket.leave(currentRoom);
+    currentRoom = null;
+    currentUserId = null;
+    currentRoomObj = null;
   });
+
+  socket.on('disconnect', () => {
+    handleDisconnect();
+  });
+
+  function handleDisconnect() {
+    if (!currentRoom || !currentUserId || !currentRoomObj) return;
+
+    const room = currentRoomObj;
+    room.users.delete(currentUserId);
+
+    if (room.host === currentUserId) {
+      io.to(currentRoom).emit('room-closed');
+      rooms.delete(currentRoom);
+    } else {
+      io.to(currentRoom).emit('user-disconnected', currentUserId);
+      if (room.users.size === 0) rooms.delete(currentRoom);
+    }
+
+    currentRoom = null;
+    currentUserId = null;
+    currentRoomObj = null;
+  }
 });
 
 server.on('error', (err) => {

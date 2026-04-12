@@ -1,26 +1,117 @@
 const socket = io('/');
 const videoGrid = document.getElementById('video-grid');
-const peer = new Peer(undefined, {
-  host: '/',
-  port: '3001',
-  debug: 3 
-});
+
+const peer = new Peer();
 
 const myVideo = document.createElement('video');
-myVideo.muted = true;
+myVideo.muted = true; // muting local to avoid echo
+
 const peers = {};
 let editor;
 let isSettingValue = false;
 let myStream = null;
+let isHost = false;
+let roomConfig = null;
+
+
+socket.on('room-config', (config) => {
+  isHost = config.isHost;
+  roomConfig = config;
+
+  const langSelector = document.getElementById('language-selector');
+  if (langSelector) {
+    // only the host should pick the language
+    langSelector.disabled = !config.isHost || !config.syntaxHighlighting;
+  }
+
+  if (editor && !config.syntaxHighlighting) {
+    editor.setOption('mode', 'text/plain');
+  }
+});
+
+socket.on('room-closed', () => {
+  alert('The host has disconnected. The room is now closed.');
+  window.location.href = '/';
+});
+
+socket.on('user-connected', (userId) => {
+  console.log('User connected:', userId);
+  setTimeout(() => connectToNewUser(userId), 1000);
+});
+
+socket.on('user-disconnected', (userId) => {
+  console.log('User disconnected:', userId);
+  if (peers[userId]) {
+    peers[userId].call.close();
+    cleanupVideoElement(userId);
+    delete peers[userId];
+  }
+});
+
+socket.on('code-update', (code, senderId) => {
+  if (socket.id === senderId) return;
+  isSettingValue = true;
+  if (editor) editor.setValue(code);
+  isSettingValue = false;
+});
+
+socket.on('language-change', (language) => {
+  if (!editor) return;
+  isSettingValue = true;
+  editor.setOption('mode', language);
+  document.getElementById('language-selector').value = language;
+  isSettingValue = false;
+});
+
+socket.on('peer-cam-state', (userId, enabled) => {
+  const container = document.querySelector(`.video-container[data-container-id="${userId}"]`);
+  if (!container) return;
+  let overlay = container.querySelector('.cam-off-overlay');
+  if (!enabled) {
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'cam-off-overlay';
+      overlay.textContent = 'Camera off';
+      container.appendChild(overlay);
+    }
+  } else {
+    if (overlay) overlay.remove();
+    const vid = container.querySelector('video');
+    if (vid && vid.srcObject) vid.play().catch(() => { });
+  }
+});
+
+socket.on('peer-mic-state', (userId, enabled) => {
+  console.log(`Peer ${userId} mic: ${enabled ? 'on' : 'off'}`);
+});
+
+peer.on('open', (id) => {
+  console.log('My peer ID:', id);
+  socket.emit('join-room', ROOM_ID, id);
+});
 
 peer.on('error', (err) => {
-  console.error('Peer connection error:', err);
-  setTimeout(() => {
-    if (peer.disconnected) {
-      peer.reconnect();
-    }
-  }, 5000);
+  console.error('Peer error:', err);
 });
+
+peer.on('call', (call) => {
+  console.log('Incoming call from:', call.peer);
+  call.answer(myStream || undefined);
+
+  const videoEl = document.createElement('video');
+
+  call.on('stream', (remoteStream) => {
+    if (!document.querySelector(`video[data-peer-id="${call.peer}"]`)) {
+      addVideoStream(videoEl, remoteStream, call.peer, false);
+    }
+  });
+
+  call.on('close', () => cleanupVideoElement(call.peer));
+  call.on('error', () => cleanupVideoElement(call.peer));
+
+  peers[call.peer] = { call, videoEl };
+});
+
 
 async function setupMediaStream() {
   try {
@@ -28,177 +119,130 @@ async function setupMediaStream() {
       video: true,
       audio: true
     });
+
+    stream.getVideoTracks().forEach(t => t.enabled = INITIAL_VIDEO);
+    stream.getAudioTracks().forEach(t => t.enabled = INITIAL_AUDIO);
+
     myStream = stream;
-    addVideoStream(myVideo, stream, 'my-video');
-
-    peer.on('call', call => {
-      console.log('Receiving call from:', call.peer);
-      call.answer(stream);
-      const video = document.createElement('video');
-      
-      call.on('stream', userVideoStream => {
-        console.log('Received stream from:', call.peer);
-        const existingVideo = document.querySelector(`video[data-peer-id="${call.peer}"]`);
-        if (!existingVideo) {
-          addVideoStream(video, userVideoStream, call.peer);
-        }
-      });
-
-      call.on('error', error => {
-        console.error('Call error:', error);
-        cleanupVideoElement(call.peer);
-      });
-
-      peers[call.peer] = {
-        call,
-        video
-      };
-    });
-
-    // Handle new user connections with retry mechanism
-    socket.on('user-connected', userId => {
-      console.log('User connected, attempting to connect to:', userId);
-      
-      // Add a small delay before connecting to ensure peer is ready
-      setTimeout(() => {
-        const retryConnect = (attempts = 0) => {
-          if (attempts < 3) {
-            try {
-              connectToNewUser(userId, stream);
-            } catch (err) {
-              console.error(`Connection attempt ${attempts + 1} failed:`, err);
-              setTimeout(() => retryConnect(attempts + 1), 1000);
-            }
-          } else {
-            console.error('Could not connect, refresh the page');
-          }
-        };
-        retryConnect();
-      }, 1000);
-    });
-
-    socket.on('code-update', (code, senderId) => {
-      if (socket.id === senderId) return;
-      
-      isSettingValue = true;
-      editor.setValue(code);
-      isSettingValue = false;
-    });
-
-    initializeCodeEditor();
+    addVideoStream(myVideo, stream, 'my-video', true);
   } catch (err) {
-    console.error('Failed to get media stream:', err);
-    alert('Failed to access camera/microphone. Please check permissions.');
+    console.warn('Media stream unavailable:', err.message);
   }
+}
+
+function connectToNewUser(userId) {
+  if (peers[userId]) {
+    console.log('Already connected to:', userId);
+    return;
+  }
+
+  if (!myStream) {
+    console.warn('No local stream — skipping call to', userId);
+    return;
+  }
+
+  console.log('Calling:', userId);
+  const call = peer.call(userId, myStream);
+  const videoEl = document.createElement('video');
+
+  call.on('stream', (remoteStream) => {
+    if (!document.querySelector(`video[data-peer-id="${userId}"]`)) {
+      addVideoStream(videoEl, remoteStream, userId, false);
+    }
+  });
+
+  call.on('close', () => cleanupVideoElement(userId));
+  call.on('error', () => {
+    cleanupVideoElement(userId);
+    delete peers[userId];
+  });
+
+  peers[userId] = { call, videoEl };
+}
+
+
+function addVideoStream(video, stream, peerId, isLocal = false) {
+  const container = document.createElement('div');
+  container.className = 'video-container' + (isLocal ? ' self' : '');
+  container.setAttribute('data-container-id', peerId);
+
+  video.srcObject = stream;
+  video.setAttribute('data-peer-id', peerId);
+  video.autoplay = true;
+  video.playsInline = true;
+  video.addEventListener('loadedmetadata', () => {
+    video.play().catch(e => console.error('Play error:', e));
+  });
+  video.addEventListener('pause', () => {
+    video.play().catch(() => { });
+  });
+
+  container.appendChild(video);
+
+  if (isLocal) {
+    const controls = createLocalControls();
+    container.appendChild(controls);
+  }
+
+  videoGrid.appendChild(container);
+}
+
+function createLocalControls() {
+  const controls = document.createElement('div');
+  controls.className = 'video-controls';
+
+  // mic button
+  const audioBtn = document.createElement('button');
+  audioBtn.className = 'control-button' + (!INITIAL_AUDIO ? ' muted' : '');
+  audioBtn.title = 'Toggle microphone';
+  audioBtn.innerHTML = `<svg viewBox="0 0 24 24"><path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z"/><path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z"/></svg>`;
+  audioBtn.onclick = () => {
+    if (!myStream) return;
+    const track = myStream.getAudioTracks()[0];
+    if (track) {
+      track.enabled = !track.enabled;
+      audioBtn.classList.toggle('muted', !track.enabled);
+      socket.emit('mic-state', track.enabled);
+    }
+  };
+
+  // Camera button
+  const videoBtn = document.createElement('button');
+  videoBtn.className = 'control-button' + (!INITIAL_VIDEO ? ' muted' : '');
+  videoBtn.title = 'Toggle camera';
+  videoBtn.innerHTML = `<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M9 2L7.17 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V6c0-1.1-.9-2-2-2h-3.17L15 2H9zm3 15c-2.76 0-5-2.24-5-5s2.24-5 5-5 5 2.24 5 5-2.24 5-5 5z"/></svg>`;
+  videoBtn.onclick = () => {
+    if (!myStream) return;
+    const track = myStream.getVideoTracks()[0];
+    if (track) {
+      track.enabled = !track.enabled;
+      videoBtn.classList.toggle('muted', !track.enabled);
+      socket.emit('cam-state', track.enabled);
+    }
+  };
+
+  controls.appendChild(audioBtn);
+  controls.appendChild(videoBtn);
+  return controls;
 }
 
 function cleanupVideoElement(peerId) {
-  const videoElements = document.querySelectorAll(`video[data-peer-id="${peerId}"]`);
-  videoElements.forEach(video => {
-    if (video.srcObject) {
-      const tracks = video.srcObject.getTracks();
-      tracks.forEach(track => track.stop());
+  const container = document.querySelector(`.video-container[data-container-id="${peerId}"]`);
+  if (container) {
+    const video = container.querySelector('video');
+    if (video && video.srcObject) {
+      video.srcObject.getTracks().forEach(t => t.stop());
       video.srcObject = null;
     }
-    video.remove();
-  });
-}
-
-socket.on('user-disconnected', userId => {
-  console.log('User disconnected:', userId);
-  if (peers[userId]) {
-    if (peers[userId].call) {
-      peers[userId].call.close();
-    }
-    cleanupVideoElement(userId);
-    delete peers[userId];
-  }
-});
-
-function connectToNewUser(userId, stream) {
-  try {
-    console.log('Initiating call to:', userId);
-    
-    // preventing rare duplicate connection bug
-    if (peers[userId]) {
-      console.log('Already connected to:', userId);
-      return;
-    }
-
-    const call = peer.call(userId, stream);
-    const video = document.createElement('video');
-
-    call.on('stream', userVideoStream => {
-      console.log('Received stream in connectToNewUser from:', userId);
-      const existingVideo = document.querySelector(`video[data-peer-id="${userId}"]`);
-      if (!existingVideo) {
-        addVideoStream(video, userVideoStream, userId);
-      }
-    });
-
-    call.on('close', () => {
-      console.log('Call closed with:', userId);
-      cleanupVideoElement(userId);
-    });
-
-    call.on('error', error => {
-      console.error('Call error with:', userId, error);
-      cleanupVideoElement(userId);
-      delete peers[userId];
-    });
-
-    peers[userId] = {
-      call,
-      video
-    };
-    
-    // this hould fix the disconnect issue
-    setTimeout(() => {
-      if (!video.srcObject) {
-        console.log('No stream received, cleaning up:', userId);
-        cleanupVideoElement(userId);
-        delete peers[userId];
-        connectToNewUser(userId, stream);
-      }
-    }, 5000);
-  } catch (err) {
-    console.error('Error connecting to new user:', err);
-    cleanupVideoElement(userId);
-    delete peers[userId];
+    container.remove();
   }
 }
-
-function addVideoStream(video, stream, peerId) {
-  try {
-    video.srcObject = stream;
-    video.setAttribute('data-peer-id', peerId);
-    
-    video.addEventListener('loadedmetadata', () => {
-      video.play().catch(err => console.error('Error playing video:', err));
-    });
-    
-    video.addEventListener('error', (e) => {
-      console.error('Video error:', e);
-      cleanupVideoElement(peerId);
-    });
-    
-    videoGrid.append(video);
-  } catch (err) {
-    console.error('Error adding video stream:', err);
-  }
-}
-
-peer.on('open', id => {
-  console.log('My peer ID:', id);
-  socket.emit('join-room', ROOM_ID, id);
-});
 
 function initializeCodeEditor() {
   const editorElement = document.getElementById('editor');
   const languageSelector = document.getElementById('language-selector');
   const themeSelector = document.getElementById('theme-selector');
 
-  // Initializing editor
   editor = CodeMirror(editorElement, {
     lineNumbers: true,
     lineWrapping: true,
@@ -206,6 +250,11 @@ function initializeCodeEditor() {
     autoCloseBrackets: true,
     theme: 'ayu-dark'
   });
+
+  if (roomConfig && !roomConfig.syntaxHighlighting) {
+    editor.setOption('mode', 'text/plain');
+    languageSelector.disabled = true;
+  }
 
   document.body.className = 'theme-dark';
 
@@ -218,43 +267,46 @@ function initializeCodeEditor() {
 
   editor.on('change', () => {
     if (isSettingValue) return;
-    const code = editor.getValue();
-    const language = languageSelector.value;
-    socket.emit('code-update', code, language);
+    socket.emit('code-update', editor.getValue());
   });
 
-  // Language change handler
   languageSelector.addEventListener('change', () => {
-    const selectedLanguage = languageSelector.value;
-    editor.setOption('mode', selectedLanguage);
-    socket.emit('language-change', selectedLanguage);
+    const lang = languageSelector.value;
+    editor.setOption('mode', lang);
+    if (isHost) socket.emit('language-change', lang);
   });
 
-  // Theme change handler
   themeSelector.addEventListener('change', () => {
-    const selectedTheme = themeSelector.value;
-    editor.setOption('theme', selectedTheme);
-    updateBodyTheme(selectedTheme);
-    localStorage.setItem('editorTheme', selectedTheme);
+    const theme = themeSelector.value;
+    editor.setOption('theme', theme);
+    updateBodyTheme(theme);
+    localStorage.setItem('editorTheme', theme);
   });
 
   function updateBodyTheme(theme) {
-    const themeMap = {
-      'eclipse': 'theme-light',
-      'material': 'theme-gray',
-      'ayu-dark': 'theme-dark'
-    };
-    document.body.className = themeMap[theme] || 'theme-dark';
+    const map = { 'eclipse': 'theme-light', 'material': 'theme-gray', 'ayu-dark': 'theme-dark' };
+    document.body.className = map[theme] || 'theme-dark';
   }
-
-  socket.on('language-change', (language) => {
-    isSettingValue = true;
-    editor.setOption('mode', language);
-    languageSelector.value = language;
-    isSettingValue = false;
-  });
 }
+initializeCodeEditor();
+setupMediaStream();
 
-setupMediaStream().catch(err => {
-  console.error('Setup failed:', err);
+// copy room id button
+document.getElementById('copy-room-btn').addEventListener('click', () => {
+  navigator.clipboard.writeText(ROOM_ID).then(() => {
+    const btn = document.getElementById('copy-room-btn');
+    btn.textContent = '\u2713 Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = '\u29c9 Copy Room ID';
+      btn.classList.remove('copied');
+    }, 2000);
+  }).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = ROOM_ID;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+  });
 });
